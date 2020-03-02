@@ -285,26 +285,30 @@ def D_paper(
                     x = minibatch_stddev_layer(x, mbstd_group_size)
                 with tf.variable_scope('Conv'):
                     x = act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale)))
+
+                #with tf.variable_scope('DenseF_0'):
+                #    F_x = act(apply_bias(dense(x, fmaps=1024, use_wscale=use_wscale)))
+                #with tf.variable_scope('DenseF_1'):
+                #    F_x = act(apply_bias(dense(F_x, fmaps=1024, use_wscale=use_wscale)))
                     
-                ## My Change
+                #shape = x.get_shape().as_list()
+                #with tf.variable_scope('Concat'):
+                #    J_x = tf.reshape(x, shape=[-1, np.prod(shape[1:])], name="Reshape")
+                #    J_x = tf.concat([J_x, latents_in], axis=1, name="x_z")
+
+                #with tf.variable_scope('DenseJ_0'):
+                #    J_x = act(apply_bias(dense(J_x, fmaps=1024, use_wscale=use_wscale)))
+                #with tf.variable_scope('DenseJ_1'):
+                #    J_x = act(apply_bias(dense(J_x, fmaps=1024, use_wscale=use_wscale)))
                 
-#                 with tf.variable_scope('Conv_down0'):   
-#                     x = act(apply_bias(conv2d_downscale2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale)))
-                        
-#                 with tf.variable_scope('Conv_down1'):      
-#                     x = act(apply_bias(conv2d_downscale2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale)))
-                
-                shape = x.get_shape().as_list()
-                with tf.variable_scope('Concat'):
-                    x = tf.reshape( x, shape=[-1, np.prod(shape[1:]) ], name = "Reshape" )
-                    x = tf.concat([x,latents_in ], axis=1, name="x_z") 
+                #with tf.variable_scope('DenseF'):
+                #    F_x = apply_bias(dense(F_x, fmaps=1 + label_size, gain=1, use_wscale=use_wscale))
                     
-                ###
-                
-                with tf.variable_scope('Dense0'):
-                    x = act(apply_bias(dense(x, fmaps=nf(res-2), use_wscale=use_wscale)))
-                with tf.variable_scope('Dense1'):
-                    x = apply_bias(dense(x, fmaps=1+label_size, gain=1, use_wscale=use_wscale))
+                #with tf.variable_scope('DenseJ'):
+                #    J_x = apply_bias(dense(J_x, fmaps=1 + label_size, gain=1, use_wscale=use_wscale))
+
+                #x = J_x + F_x
+
             return x
     
     # Linear structure: simple but inefficient.
@@ -329,11 +333,36 @@ def D_paper(
             if res > 2: y = cset(y, (lod_in > lod), lambda: lerp(x, fromrgb(downscale2d(images_in, 2**(lod+1)), res - 1), lod_in - lod))
             return y()
         combo_out = grow(2, resolution_log2 - 2)
+    
+    x = combo_out
+    with tf.variable_scope('DenseF_0'):
+        F_x = act(apply_bias(dense(x, fmaps=1024, use_wscale=use_wscale)))
+    with tf.variable_scope('DenseF_1'):
+        F_x = act(apply_bias(dense(F_x, fmaps=1024, use_wscale=use_wscale)))
+        
+    shape = x.get_shape().as_list()
+    with tf.variable_scope('Concat'):
+        J_x = tf.reshape(x, shape=[-1, np.prod(shape[1:])], name="Reshape")
+        J_x = tf.concat([J_x, latents_in], axis=1, name="x_z")
 
+    with tf.variable_scope('DenseJ_0'):
+        J_x = act(apply_bias(dense(J_x, fmaps=1024, use_wscale=use_wscale)))
+    with tf.variable_scope('DenseJ_1'):
+        J_x = act(apply_bias(dense(J_x, fmaps=1024, use_wscale=use_wscale)))
+
+    with tf.variable_scope('DenseF'):
+        F_x = apply_bias(dense(F_x, fmaps=1 + label_size, gain=1, use_wscale=use_wscale))
+
+    with tf.variable_scope('DenseJ'):
+        J_x = apply_bias(dense(J_x, fmaps=1 + label_size, gain=1, use_wscale=use_wscale))
+    
+    combo_out = J_x + F_x
+    
     assert combo_out.dtype == tf.as_dtype(dtype)
     scores_out = tf.identity(combo_out[:, :1], name='scores_out')
     labels_out = tf.identity(combo_out[:, 1:], name='labels_out')
     return scores_out, labels_out
+    #return F_x, J_x
 
 #----------------------------------------------------------------------------
 def Encoder(
@@ -407,32 +436,34 @@ def pro_Encoder(
     def fromrgb(x, res): # res = 2..resolution_log2
         with tf.variable_scope('FromRGB_lod%d' % (resolution_log2 - res)):
             return act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=1, use_wscale=use_wscale)))
+        
     def block(x, res): # res = 2..resolution_log2
         with tf.variable_scope('%dx%d' % (2**res, 2**res)):
             if res >= 3: # 8x8 and up
                 with tf.variable_scope('Conv0'):
-                    x = PN( act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale))) )
+                    #x = PN( act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale))) )
+                    x = act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale)))
                 if fused_scale:
                     with tf.variable_scope('Conv1_down'):
-                        x = PN( act(apply_bias(conv2d_downscale2d(x, fmaps=nf(res-2), kernel=3, use_wscale=use_wscale))) )
+                        #x = PN( act(apply_bias(conv2d_downscale2d(x, fmaps=nf(res-2), kernel=3, use_wscale=use_wscale))) )
+                        x = act(apply_bias(conv2d_downscale2d(x, fmaps=nf(res-2), kernel=3, use_wscale=use_wscale)))
                 else:
                     with tf.variable_scope('Conv1'):
-                        x = PN( act(apply_bias(conv2d(x, fmaps=nf(res-2), kernel=3, use_wscale=use_wscale))) )
-                    x = downscale2d(x)
+                        #x = PN( act(apply_bias(conv2d(x, fmaps=nf(res-2), kernel=3, use_wscale=use_wscale))) )
+                        x = act(apply_bias(conv2d(x, fmaps=nf(res-2), kernel=3, use_wscale=use_wscale)))
+                    x = downscale2d(x)                   
             else: # 4x4
                 with tf.variable_scope('Conv'):
-                    x = PN( act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale))) )
-                    x = PN( act(apply_bias(x)) )
-                    
-                shape = x.get_shape().as_list()
-                with tf.variable_scope('Reshape'):
-                    x = tf.reshape( x, shape=[-1, np.prod(shape[1:]) ], name = "Reshape" )
+                    #x = PN( act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale))) )
+                    x = act(apply_bias(conv2d(x, fmaps=nf(res-1), kernel=3, use_wscale=use_wscale)))
                 
                 with tf.variable_scope('Dense0'):
-                    x = dense(x, fmaps=z_len,gain=np.sqrt(2)/4, use_wscale=use_wscale)
-                    # x = tf.math.l2_normalize(x,axis=1)
-                    x = PN(x)
+                    x = act(apply_bias(dense(x, fmaps=nf(res-2), use_wscale=use_wscale)))
+                    
+                with tf.variable_scope('Dense1'):
+                    x = apply_bias(dense(x, fmaps=z_len, gain=1, use_wscale=use_wscale))
                     #x = tf.nn.tanh(x)
+                    
             return x
     
     # Linear structure: simple but inefficient.

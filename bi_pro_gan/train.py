@@ -10,7 +10,7 @@ import time
 import numpy as np
 import tensorflow as tf
 import sys
-
+import collections
 import config
 import tfutil
 import dataset
@@ -49,6 +49,7 @@ def setup_snapshot_image_grid(G, training_set,
 
     # Generate latents.
     latents = misc.random_latents(gw * gh, G)
+    # print("REALS SHAPES",reals.shape, "LATENTS", latents.shape)
     return (gw, gh), reals, labels, latents
 
 #----------------------------------------------------------------------------
@@ -145,7 +146,7 @@ def train_progressive_gan(
     save_weight_histograms  = False,        # Include weight histograms in the tfevents file?
     resume_run_id           = None,         # Run ID or network pkl to resume training from, None = start from scratch.
     resume_snapshot         = None,         # Snapshot index to resume training from, None = autodetect.
-    resume_kimg             = 0.0,          # Assumed training progress at the beginning. Affects reporting and training schedule.
+    resume_kimg             = 0,          # Assumed training progress at the beginning. Affects reporting and training schedule.
     resume_time             = 0.0):         # Assumed wallclock time at the beginning. Affects reporting.
 
     maintenance_start_time = time.time()
@@ -156,16 +157,17 @@ def train_progressive_gan(
         if resume_run_id is not None:
             network_pkl = misc.locate_network_pkl(resume_run_id, resume_snapshot)
             print('Loading networks from "%s"...' % network_pkl)
-            G, D, Gs, E = misc.load_pkl(network_pkl)
+            G, D, E, Gs, Es = misc.load_pkl(network_pkl)
         else:
             print('Constructing networks...')
             G = tfutil.Network('G', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **config.G)
-            D = tfutil.Network('D', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **config.D)
-            
+            D = tfutil.Network('D', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **config.D)         
             E = tfutil.Network('E', num_channels=training_set.shape[0], resolution=training_set.shape[1], label_size=training_set.label_size, **config.E)
             
             Gs = G.clone('Gs')
+            Es = E.clone('Es')
         Gs_update_op = Gs.setup_as_moving_average_of(G, beta=G_smoothing)
+        Es_update_op = Es.setup_as_moving_average_of(E, beta=G_smoothing)
     G.print_layers(); D.print_layers(); E.print_layers()
     
     print('Building TensorFlow graph...')
@@ -177,9 +179,10 @@ def train_progressive_gan(
         reals, labels   = training_set.get_minibatch_tf()
         reals_split     = tf.split(reals, config.num_gpus)
         labels_split    = tf.split(labels, config.num_gpus)
-    G_opt = tfutil.Optimizer(name='TrainG', learning_rate=lrate_in, **config.G_opt)
+    #G_opt = tfutil.Optimizer(name='TrainG', learning_rate=lrate_in, **config.G_opt)
     D_opt = tfutil.Optimizer(name='TrainD', learning_rate=lrate_in, **config.D_opt)
-    E_opt = tfutil.Optimizer(name='TrainE', learning_rate=lrate_in, **config.E_opt)
+    #E_opt = tfutil.Optimizer(name='TrainE', learning_rate=lrate_in, **config.E_opt)
+    G_E_opt = tfutil.Optimizer(name='TrainGE', learning_rate=lrate_in, **config.G_opt)
     for gpu in range(config.num_gpus):
         with tf.name_scope('GPU%d' % gpu), tf.device('/gpu:%d' % gpu):
             G_gpu = G if gpu == 0 else G.clone(G.name + '_shadow')
@@ -190,17 +193,20 @@ def train_progressive_gan(
             reals_gpu = process_reals(reals_split[gpu], lod_in, mirror_augment, training_set.dynamic_range, drange_net)
             labels_gpu = labels_split[gpu]
             with tf.name_scope('G_loss'), tf.control_dependencies(lod_assign_ops):
-                G_loss = tfutil.call_func_by_name(G=G_gpu, D=D_gpu,E=E_gpu, opt=G_opt, training_set=training_set, minibatch_size=minibatch_split, **config.G_loss)
+                G_loss = tfutil.call_func_by_name(G=G_gpu, D=D_gpu,E=E_gpu, opt=G_E_opt, training_set=training_set, minibatch_size=minibatch_split,reals=reals_gpu,  **config.G_loss)
             with tf.name_scope('D_loss'), tf.control_dependencies(lod_assign_ops):
                 D_loss = tfutil.call_func_by_name(G=G_gpu, D=D_gpu,E=E_gpu, opt=D_opt, training_set=training_set, minibatch_size=minibatch_split, reals=reals_gpu, labels=labels_gpu, **config.D_loss)
             with tf.name_scope('E_loss'), tf.control_dependencies(lod_assign_ops):
-                E_loss = tfutil.call_func_by_name(G=G_gpu, D=D_gpu,E =E_gpu, opt=E_opt, training_set=training_set,reals=reals_gpu, minibatch_size=minibatch_split, **config.E_loss)
-            G_opt.register_gradients(tf.reduce_mean(G_loss), G_gpu.trainables)
+                E_loss = tfutil.call_func_by_name(G=G_gpu, D=D_gpu,E =E_gpu, opt=G_E_opt, training_set=training_set, minibatch_size=minibatch_split,reals=reals_gpu, labels=labels_gpu,  **config.E_loss)
+            #G_opt.register_gradients(tf.reduce_mean(G_loss), G_gpu.trainables)
             D_opt.register_gradients(tf.reduce_mean(D_loss), D_gpu.trainables)
-            E_opt.register_gradients(tf.reduce_mean(E_loss), E_gpu.trainables)
-    G_train_op = G_opt.apply_updates()
+            #E_opt.register_gradients(tf.reduce_mean(E_loss), E_gpu.trainables)
+            G_E_opt.register_gradients( tf.reduce_mean(G_loss) + tf.reduce_mean(E_loss), 
+                  collections.OrderedDict( list( G_gpu.trainables.items() ) + list ( E_gpu.trainables.items() ) ) )
+    #G_train_op = G_opt.apply_updates()
     D_train_op = D_opt.apply_updates()
-    E_train_op = E_opt.apply_updates()
+    #E_train_op = E_opt.apply_updates()
+    G_E_train_op = G_E_opt.apply_updates()
     
     #sys.exit(0)
     
@@ -213,11 +219,14 @@ def train_progressive_gan(
     result_subdir = misc.create_result_subdir(config.result_dir, config.desc)
     misc.save_image_grid(grid_reals, os.path.join(result_subdir, 'reals.png'), drange=training_set.dynamic_range, grid_size=grid_size)
     misc.save_image_grid(grid_fakes, os.path.join(result_subdir, 'fakes%06d.png' % 0), drange=drange_net, grid_size=grid_size)
+    misc.save_encoder_progress(Es,Gs,grid_reals,os.path.join(result_subdir, 'recons%06d.png' % 0),sched.minibatch//config.num_gpus,drange = training_set.dynamic_range,drange_net = drange_net)
+
+
     summary_log = tf.summary.FileWriter(result_subdir)
     if save_tf_graph:
         summary_log.add_graph(tf.get_default_graph())
     if save_weight_histograms:
-        G.setup_weight_histograms(); D.setup_weight_histograms()
+        G.setup_weight_histograms(); D.setup_weight_histograms(); E.setup_weight_histograms() 
 
     print('Training...')
     cur_nimg = int(resume_kimg * 1000)
@@ -233,15 +242,15 @@ def train_progressive_gan(
         training_set.configure(sched.minibatch, sched.lod)
         if reset_opt_for_new_lod:
             if np.floor(sched.lod) != np.floor(prev_lod) or np.ceil(sched.lod) != np.ceil(prev_lod):
-                G_opt.reset_optimizer_state(); D_opt.reset_optimizer_state(); E_opt.reset_optimizer_state() 
+                G_E_opt.reset_optimizer_state(); D_opt.reset_optimizer_state(); #G_opt.reset_optimizer_state();  E_opt.reset_optimizer_state() 
         prev_lod = sched.lod
 
         # Run training ops.
         for repeat in range(minibatch_repeats):
             for _ in range(D_repeats):
-                tfutil.run([D_train_op, Gs_update_op], {lod_in: sched.lod, lrate_in: sched.D_lrate, minibatch_in: sched.minibatch})
+                tfutil.run([D_train_op, Gs_update_op, Es_update_op], {lod_in: sched.lod, lrate_in: sched.D_lrate, minibatch_in: sched.minibatch})
                 cur_nimg += sched.minibatch
-            tfutil.run([G_train_op, E_train_op], {lod_in: sched.lod, lrate_in: sched.G_lrate, minibatch_in: sched.minibatch})
+            tfutil.run(G_E_train_op, {lod_in: sched.lod, lrate_in: sched.G_lrate, minibatch_in: sched.minibatch})
 
         # Perform maintenance tasks once per tick.
         done = (cur_nimg >= total_kimg * 1000)
@@ -274,16 +283,17 @@ def train_progressive_gan(
                 grid_fakes = Gs.run(grid_latents, grid_labels, minibatch_size=sched.minibatch//config.num_gpus)
                 misc.save_image_grid(grid_fakes, os.path.join(result_subdir, 'fakes%06d.png' % (cur_nimg // 1000)), drange=drange_net, grid_size=grid_size)
                 
-                misc.save_all_res(training_set.shape[1], Gs, result_subdir,50,minibatch_size=sched.minibatch//config.num_gpus)
+                #misc.save_all_res(training_set.shape[1], Gs, result_subdir,50,minibatch_size=sched.minibatch//config.num_gpus)
+                misc.save_encoder_progress(Es,Gs,grid_reals,os.path.join(result_subdir, 'recons%06d.png' % (cur_nimg // 1000)),sched.minibatch//config.num_gpus,drange = training_set.dynamic_range,drange_net = drange_net)
             
             if cur_tick % network_snapshot_ticks == 0 or done:
-                misc.save_pkl((G, D, Gs, E), os.path.join(result_subdir, 'network-snapshot-%06d.pkl' % (cur_nimg // 1000)))
+                misc.save_pkl((G, D, E, Gs, Es), os.path.join(result_subdir, 'network-snapshot-%06d.pkl' % (cur_nimg // 1000)))
 
             # Record start time of the next tick.
             tick_start_time = time.time()
 
     # Write final results.
-    misc.save_pkl((G, D, Gs, E), os.path.join(result_subdir, 'network-final.pkl'))
+    misc.save_pkl((G, D, E, Gs, Es), os.path.join(result_subdir, 'network-final.pkl'))
     summary_log.close()
     open(os.path.join(result_subdir, '_training-done.txt'), 'wt').close()
 

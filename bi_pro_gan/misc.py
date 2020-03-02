@@ -83,6 +83,30 @@ def save_image(image, filename, drange=[0,1], quality=95):
 def save_image_grid(images, filename, drange=[0,1], grid_size=None):
     convert_to_pil_image(create_image_grid(images, grid_size), drange).save(filename)
 
+def save_encoder_progress(E,Gs,grid_reals,filename,minibatch_size,drange = [0,255],drange_net = [-1,1]):
+    recon_latents = E.run(grid_reals,minibatch_size = minibatch_size)
+    labels = np.zeros([recon_latents.shape[0], 0], np.float32)
+    grid_recons = Gs.run(recon_latents,labels,minibatch_size = minibatch_size)    
+    new_recons = []
+    for image in grid_recons:
+        image = adjust_dynamic_range(image, drange_net, [0,255])
+        image = np.rint(image).clip(0, 255).astype(np.uint8)
+        new_recons.append(image)
+    convert_to_pil_image(create_encoder_grid(grid_reals,new_recons),drange).save(filename)
+
+def create_encoder_grid(images1,images2):
+    num,img_w,img_h = min(25, images1.shape[0]),images1.shape[-1],images1.shape[-2]
+    grid_w = img_w * num
+    grid_h = img_h * 2
+    grid = np.zeros(list(images1.shape[1:-2])+[grid_h,grid_w],dtype = images1.dtype)
+    for idx in range(num):
+        x = idx*img_w
+        grid[...,0:img_h,x:x+img_w] = images1[idx]
+        grid[...,img_h:2*img_h,x:x+img_w] = images2[idx]
+
+    return grid    
+    
+
 def save_all_res( max_res, Gs, res_subdir, num_pngs, grid_size=[1,1], random_seed=1000, minibatch_size=8  ):
     shrink = 1
     random_state = np.random.RandomState(random_seed)

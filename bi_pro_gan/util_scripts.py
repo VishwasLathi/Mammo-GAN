@@ -32,7 +32,7 @@ def generate_fake_images(run_id, snapshot=None, grid_size=[1,1], num_pngs=1, ima
     random_state = np.random.RandomState(random_seed)
 
     print('Loading network from "%s"...' % network_pkl)
-    G, D, Gs, E = misc.load_network_pkl(run_id, snapshot)
+    G, D, E, Gs, Es = misc.load_network_pkl(run_id, snapshot)
 
     result_subdir = misc.create_result_subdir(config.result_dir, config.desc)
     for png_idx in range(num_pngs):

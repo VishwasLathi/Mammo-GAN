@@ -622,7 +622,48 @@ def create_from_images(tfrecord_dir, image_dir, shuffle):
             tfr.add_image(img)
 
 #----------------------------------------------------------------------------
+def create_from_imagenet(tfrecord_dir, image_dir, shuffle):
+    print('Loading images from "%s"' % image_dir)
+    image_filenames =  [os.path.join(dp, f) for dp, dn, filenames in os.walk(image_dir) for f in filenames if f.split('.')[-1] != "txt"]
+    if len(image_filenames) == 0:
+        error('No input images found')
 
+    with TFRecordExporter(tfrecord_dir, len(image_filenames)) as tfr:
+        order = tfr.choose_shuffled_order() if shuffle else np.arange(len(image_filenames))
+        for idx in range(order.size):
+            img = np.asarray(PIL.Image.open(image_filenames[order[idx]]).resize((128,128)))
+            channels = img.shape[2] if img.ndim ==3 else 1
+            if channels == 1:
+                continue
+                print("here")
+                #img = img[np.newaxis, :, :] # HW => CHW
+            else:
+                img = img.transpose(2, 0, 1) # HWC => CHW
+            tfr.add_image(img)
+
+
+def create_from_mnist(tfrecord_dir, image_dir, shuffle):
+    print('Loading images from "%s"' % image_dir)
+    image_filenames =  [os.path.join(dp, f) for dp, dn, filenames in os.walk(image_dir) for f in filenames if f.split('.')[-1] != "txt"]
+    if len(image_filenames) == 0:
+        error('No input images found')
+
+    with TFRecordExporter(tfrecord_dir, len(image_filenames)) as tfr:
+        order = tfr.choose_shuffled_order() if shuffle else np.arange(len(image_filenames))
+        for idx in range(order.size):
+            img = np.asarray(PIL.Image.open(image_filenames[order[idx]]).resize((32,32)))
+            channels = img.shape[2] if img.ndim ==3 else 1
+            if channels == 1:
+                continue
+                print("here")
+                #img = img[np.newaxis, :, :] # HW => CHW
+            else:
+                img = img.transpose(2, 0, 1) # HWC => CHW
+            tfr.add_image(img)
+
+
+
+#----------------------------------------------------------------------------
 def create_from_hdf5(tfrecord_dir, hdf5_filename, shuffle):
     print('Loading HDF5 archive from "%s"' % hdf5_filename)
     import h5py # conda install h5py
@@ -717,6 +758,16 @@ def execute_cmdline(argv):
 
     p = add_command(    'create_from_images', 'Create dataset from a directory full of images.',
                                             'create_from_images datasets/mydataset myimagedir')
+    p.add_argument(     'tfrecord_dir',     help='New dataset directory to be created')
+    p.add_argument(     'image_dir',        help='Directory containing the images')
+    p.add_argument(     '--shuffle',        help='Randomize image order (default: 1)', type=int, default=1)
+
+    p = add_command(    'create_from_imagenet', 'Create dataset recursively from a directory full of images.',
+                                            'create_from_images datasets/mydataset myimagedir')
+
+    p = add_command(    'create_from_mnist', 'Create dataset recursively from a directory full of images.',
+                                            'create_from_images datasets/mydataset myimagedir')
+
     p.add_argument(     'tfrecord_dir',     help='New dataset directory to be created')
     p.add_argument(     'image_dir',        help='Directory containing the images')
     p.add_argument(     '--shuffle',        help='Randomize image order (default: 1)', type=int, default=1)

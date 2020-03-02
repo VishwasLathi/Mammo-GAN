@@ -1,5 +1,4 @@
-
-# Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
+#Copyright (c) 2018, NVIDIA CORPORATION. All rights reserved.
 #
 # This work is licensed under the Creative Commons Attribution-NonCommercial
 # 4.0 International License. To view a copy of this license, visit
@@ -19,6 +18,9 @@ def fp32(*values):
         values = values[0]
     values = tuple(tf.cast(v, tf.float32) for v in values)
     return values if len(values) >= 2 else values[0]
+
+def hinge(x):
+    return tf.nn.relu( 1.0 - x )
 
 #----------------------------------------------------------------------------
 # Generator loss function used in the paper (WGAN + AC-GAN).
@@ -189,7 +191,15 @@ def D_lo_gan(G, D, E , opt, training_set, minibatch_size, reals, labels,
 #----------------------------------------------------------------------------
 # Discriminator loss function for training Bi-GAN
 
-def D_bigan_acgan(G, D, E, opt, training_set, minibatch_size, reals, labels, latents=None,
+def gp_loss( mixed_scores, mixed_images, wgan_target, opt):
+    mixed_loss = opt.apply_loss_scaling(tf.reduce_sum(mixed_scores))
+    mixed_grads = opt.undo_loss_scaling(fp32(tf.gradients(mixed_loss, [mixed_images])[0]))
+    mixed_norms = tf.sqrt(tf.reduce_sum(tf.square(mixed_grads), axis=[1,2,3]))
+    mixed_norms = tfutil.autosummary('Loss/mixed_norms', mixed_norms)
+    gradient_penalty = tf.square(mixed_norms - wgan_target)
+    return gradient_penalty
+
+def D_bigan_acgan(G, D, E, opt, training_set, minibatch_size, reals, labels,
     wgan_lambda     = 10.0,     # Weight for the gradient penalty term.
     wgan_epsilon    = 0.001,    # Weight for the epsilon term, \epsilon_{drift}.
     wgan_target     = 1.0,      # Target value for gradient magnitudes.
@@ -207,21 +217,31 @@ def D_bigan_acgan(G, D, E, opt, training_set, minibatch_size, reals, labels, lat
     real_scores_out = tfutil.autosummary('Loss/real_scores', real_scores_out)
     fake_scores_out = tfutil.autosummary('Loss/fake_scores', fake_scores_out)
     loss = fake_scores_out - real_scores_out
+    
+    #real_s_x, real_s_x_z = fp32(D.get_output_for(reals,L, is_training=True))
+    #fake_s_x, fake_s_x_z = fp32(D.get_output_for(fake_images_out,latents, is_training=True))
+    #loss = - real_s_x - real_s_x_z + fake_s_x + fake_s_x_z
 
     with tf.name_scope('GradientPenalty'):
         mixing_factors = tf.random_uniform([minibatch_size, 1, 1, 1], 0.0, 1.0, dtype=X_hat.dtype)
         mixed_images_out = tfutil.lerp(tf.cast(reals, X_hat.dtype), X_hat, mixing_factors)
         mixed_scores_out, mixed_labels_out = fp32(D.get_output_for(mixed_images_out,L, is_training=True))
+        #mixed_scores_s_x, mixed_scores_s_x_z = fp32(D.get_output_for(mixed_images_out,L, is_training=True))
         mixed_scores_out = tfutil.autosummary('Loss/mixed_scores', mixed_scores_out)
         mixed_loss = opt.apply_loss_scaling(tf.reduce_sum(mixed_scores_out))
         mixed_grads = opt.undo_loss_scaling(fp32(tf.gradients(mixed_loss, [mixed_images_out])[0]))
         mixed_norms = tf.sqrt(tf.reduce_sum(tf.square(mixed_grads), axis=[1,2,3]))
         mixed_norms = tfutil.autosummary('Loss/mixed_norms', mixed_norms)
         gradient_penalty = tf.square(mixed_norms - wgan_target)
+        #gradient_penalty = gp_loss( mixed_scores_s_x, mixed_images_out, wgan_target, opt)
+        #gradient_penalty += gp_loss( mixed_scores_s_x_z, mixed_images_out, wgan_target, opt)
+        
     loss += gradient_penalty * (wgan_lambda / (wgan_target**2))
 
     with tf.name_scope('EpsilonPenalty'):
         epsilon_penalty = tfutil.autosummary('Loss/epsilon_penalty', tf.square(real_scores_out))
+        #epsilon_penalty = tfutil.autosummary('Loss/epsilon_penalty_x', tf.square(real_s_x))
+        #epsilon_penalty += tfutil.autosummary('Loss/epsilon_penalty_x_z', tf.square(real_s_x_z))
     loss += epsilon_penalty * wgan_epsilon
 
     if D.output_shapes[1][1] > 0:
@@ -238,29 +258,72 @@ def D_bigan_acgan(G, D, E, opt, training_set, minibatch_size, reals, labels, lat
 #----------------------------------------------------------------------------
 # Generator loss function used in the paper 
 
-def G_bigan_acgan(G, D,E,  opt, training_set, minibatch_size,
+def G_bigan_acgan(G, D,E,  opt, training_set, minibatch_size, reals,
     cond_weight = 1.0): # Weight of the conditioning term.
 
     #latents = tf.random_normal([minibatch_size] + G.input_shapes[0][1:])
     latents = tf.random_uniform( [minibatch_size] + G.input_shapes[0][1:], -1.0, 1.0)
     labels = training_set.get_random_labels_tf(minibatch_size)
+
     fake_images_out = G.get_output_for(latents, labels, is_training=True)
     fake_scores_out, fake_labels_out = fp32(D.get_output_for(fake_images_out,latents,is_training=True))
     loss = -fake_scores_out
+    
+    #fake_s_x, fake_s_x_z = fp32(D.get_output_for(fake_images_out,latents,is_training=True))
+    #loss = -fake_s_x - fake_s_x_z
+    
+    #New Addition
+    #L = E.get_output_for(reals, is_training=True)
+    #real_scores_out, real_labels_out = fp32(D.get_output_for(reals,L, is_training=True))
+    #loss += real_scores_out
 
+    #reconstruction Img loss
+    #recon_imgs = G.get_output_for(L, labels, is_training=True)
+    #ax1 = [i for i in range(1, len(reals.get_shape()))]
+    #recon_imgs_loss = tf.reduce_mean( tf.abs(reals-recon_imgs), axis = ax1 )
+    #loss += recon_imgs_loss
+    #recon_imgs_loss = tf.reduce_mean( recon_imgs_loss )
+    
     if D.output_shapes[1][1] > 0:
         with tf.name_scope('LabelPenalty'):
             label_penalty_fakes = tf.nn.softmax_cross_entropy_with_logits_v2(labels=labels, logits=fake_labels_out)
         loss += label_penalty_fakes * cond_weight
+
     return loss
 
 #----------------------------------------------------------------------------
 # Encode loss function used in the paper 
 
-def E_bigan_acgan(G, D, E, opt, training_set, minibatch_size,reals,
+def E_bigan_acgan(G, D, E, opt, training_set, minibatch_size,reals, labels,
     cond_weight = 1.0, eps = 0.001): # Weight of the conditioning term.
 
+    latents = tf.random_uniform([minibatch_size] + G.input_shapes[0][1:], -1.0, 1.0)
+    labels = training_set.get_random_labels_tf(minibatch_size)
+
+    #reconstruction Z loss
+    #fake_images_out = G.get_output_for(latents, labels, is_training=True)
+    #recon_latents = E.get_output_for(fake_images_out, is_training=True)
+    #ax2 = [i for i in range(1, len(latents.get_shape()))]
+    #recons_Z_loss = tf.reduce_mean( tf.abs(recon_latents-latents), axis = ax2  )
+
+    #original encoder loss
     L = E.get_output_for(reals, is_training=True)
     real_scores_out, real_labels_out = fp32(D.get_output_for(reals,L, is_training=True))
     loss = real_scores_out
+    
+    #real_s_x, real_s_x_z = fp32(D.get_output_for(reals,L, is_training=True))
+    #loss = real_s_x + real_s_x_z
+
+    #New Addition
+    #fake_images_out = G.get_output_for(latents, labels, is_training=True)
+    #fake_scores_out, fake_labels_out = fp32(D.get_output_for(fake_images_out,latents,is_training=True))
+    #loss += -fake_scores_out
+
+    #reconstruction Img loss
+    #recon_imgs = G.get_output_for(L, labels, is_training=True)
+    #recon_imgs_loss = tf.reduce_sum( tf.square(reals-recon_imgs), 0 )
+    #recon_imgs_loss = tf.reduce_mean( recon_imgs_loss )
+
+    #loss += 0.5 * recons_Z_loss #+ recon_imgs_loss
+
     return loss
